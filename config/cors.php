@@ -16,6 +16,7 @@ return [
         'http://127.0.0.1:5173',
         'http://localhost:3000',
         'http://127.0.0.1:3000',
+        'https://bansos-hub.netlify.app',
     ],
 
     'allowed_origins_patterns' => [],
