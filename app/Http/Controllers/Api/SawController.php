@@ -3,91 +3,196 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use Illuminate\Http\Request;
 use App\Models\Pengajuan;
 use App\Models\Kriteria;
-use Illuminate\Support\Facades\Http; // <-- Ini penting untuk menembak API Python
 
 class SawController extends Controller
 {
-    // Fungsi 1: Menyiapkan Data (Sudah kita buat sebelumnya)
-    public function siapkanDataUntukPython()
+    /**
+     * GET /api/saw/hitung
+     *
+     * Hitung ranking SAW sepenuhnya di PHP — tidak butuh Python microservice.
+     *
+     * Alur:
+     *  1. Ambil semua pengajuan berstatus 'disetujui' beserta relasi warga & penilaian.
+     *  2. Ambil kriteria (bobot + tipe) dari DB.
+     *  3. Normalisasi bobot → total = 1.
+     *  4. Bangun matriks keputusan dari nilai sub-kriteria tiap warga.
+     *  5. Normalisasi matriks (benefit: x/max, cost: min/x).
+     *  6. Hitung skor V = Σ(bobot_norm × r_ij).
+     *  7. Urutkan descending → kembalikan sebagai JSON.
+     */
+    public function hitungRanking()
     {
-        $pengajuan_valid = Pengajuan::with(['warga', 'penilaian.subKriteria'])
-                                    ->where('status', 'disetujui')
-                                    ->get();
+        // ── 1. Ambil data pengajuan ──────────────────────────────────
+        $pengajuanList = Pengajuan::with(['warga', 'penilaian.subKriteria'])
+            ->where('status', 'disetujui')
+            ->get();
 
-        if ($pengajuan_valid->isEmpty()) {
-            return response()->json(['success' => false, 'message' => 'Belum ada data warga yang disetujui RT.'], 404);
+        if ($pengajuanList->isEmpty()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Belum ada data warga yang berstatus disetujui.',
+            ], 404);
         }
 
-        $data_kriteria = Kriteria::all()->map(function($k) {
-            return [
-                'id_kriteria' => 'C' . $k->id_kriteria,
-                'tipe' => $k->tipe,
-                'bobot' => $k->bobot
+        // ── 2. Ambil kriteria ────────────────────────────────────────
+        $kriteriaList = Kriteria::orderBy('id_kriteria')->get();
+
+        if ($kriteriaList->isEmpty()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Data kriteria tidak ditemukan.',
+            ], 404);
+        }
+
+        // ── 3. Normalisasi bobot (pastikan total = 1) ────────────────
+        $totalBobot = $kriteriaList->sum('bobot');
+        if ($totalBobot <= 0) $totalBobot = 1;
+
+        // Map: id_kriteria → ['tipe', 'bobot_norm']
+        $kriteriaMap = [];
+        foreach ($kriteriaList as $k) {
+            $kriteriaMap[$k->id_kriteria] = [
+                'nama'       => $k->nama_kriteria,
+                'tipe'       => $k->tipe,             // 'benefit' | 'cost'
+                'bobot_norm' => $k->bobot / $totalBobot,
             ];
-        });
+        }
 
-        $dataset_warga = [];
+        // ── 4. Bangun matriks keputusan ──────────────────────────────
+        // $matriks[id_pengajuan][id_kriteria] = nilai_subkriteria (float)
+        $matriks = [];
+        $meta    = []; // simpan nama & info warga
 
-        foreach ($pengajuan_valid as $p) {
-            $baris = [
-                'id_pengajuan' => $p->id_pengajuan,
-                'nama_warga' => $p->warga->nama_lengkap,
-                'alamat' => $p->warga->alamat,
-                'rt' => $p->warga->rt,
+        foreach ($pengajuanList as $p) {
+            if (!$p->warga) continue;
+
+            $idP = $p->id_pengajuan;
+            $meta[$idP] = [
+                'id_pengajuan' => $idP,
+                'nama_warga'   => $p->warga->nama_lengkap,
+                'alamat'       => $p->warga->alamat ?? '',
+                'rt'           => $p->warga->rt,
             ];
 
             foreach ($p->penilaian as $penilaian) {
-                $kode_kriteria = 'C' . $penilaian->id_kriteria;
-                $baris[$kode_kriteria] = $penilaian->subKriteria->nilai;
+                if (!$penilaian->subKriteria) continue;
+                $matriks[$idP][$penilaian->id_kriteria] = (float) $penilaian->subKriteria->nilai;
+            }
+        }
+
+        if (empty($matriks)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Tidak ada data penilaian yang valid.',
+            ], 404);
+        }
+
+        // ── 5. Tentukan max & min per kriteria ───────────────────────
+        $maxNilai = [];
+        $minNilai = [];
+
+        foreach ($kriteriaMap as $idK => $_) {
+            $kolom = array_filter(
+                array_column($matriks, $idK),
+                fn($v) => is_numeric($v)
+            );
+
+            if (empty($kolom)) {
+                $maxNilai[$idK] = 1;
+                $minNilai[$idK] = 1;
+            } else {
+                $maxNilai[$idK] = max($kolom);
+                $minNilai[$idK] = min($kolom);
+            }
+        }
+
+        // ── 6. Hitung skor V ─────────────────────────────────────────
+        $hasil = [];
+
+        foreach ($matriks as $idP => $nilaiPerKriteria) {
+            $skorV = 0.0;
+
+            foreach ($kriteriaMap as $idK => $info) {
+                $nilai = $nilaiPerKriteria[$idK] ?? 0;
+                $max   = $maxNilai[$idK] ?: 1;
+                $min   = $minNilai[$idK] ?: 1;
+
+                // Normalisasi SAW
+                if ($info['tipe'] === 'benefit') {
+                    $rij = ($max > 0) ? ($nilai / $max) : 0;
+                } else {
+                    // cost: semakin kecil nilainya, semakin baik
+                    $rij = ($nilai > 0) ? ($min / $nilai) : 0;
+                }
+
+                $skorV += $info['bobot_norm'] * $rij;
             }
 
-            $dataset_warga[] = $baris;
+            $hasil[] = array_merge($meta[$idP], [
+                'skor_saw' => round($skorV, 6),
+            ]);
+        }
+
+        // ── 7. Urutkan descending berdasarkan skor ───────────────────
+        usort($hasil, fn($a, $b) => $b['skor_saw'] <=> $a['skor_saw']);
+
+        // Tambahkan kolom ranking
+        foreach ($hasil as $i => &$row) {
+            $row['ranking'] = $i + 1;
         }
 
         return response()->json([
             'success' => true,
-            'kriteria' => $data_kriteria,
-            'dataset' => $dataset_warga
+            'source'  => 'php',
+            'total'   => count($hasil),
+            'data'    => $hasil,
         ]);
     }
 
-    // Fungsi 2: Jembatan Eksekusi ke Python (BARU)
-    public function hitungRanking()
+    /**
+     * GET /api/saw/dataset
+     *
+     * Endpoint opsional: kembalikan dataset mentah (matriks nilai)
+     * tanpa menghitung skor — berguna untuk debug atau export.
+     */
+    public function getDataset()
     {
-        // 1. Ambil dataset dari fungsi di atas
-        $responseDataset = $this->siapkanDataUntukPython();
-        
-        // Jika data kosong, langsung kembalikan errornya
-        if ($responseDataset->getStatusCode() != 200) {
-            return $responseDataset;
-        }
+        $pengajuanList = Pengajuan::with(['warga', 'penilaian.subKriteria'])
+            ->where('status', 'disetujui')
+            ->get();
 
-        $data = $responseDataset->getData(true); // Ekstrak JSON menjadi Array
+        $kriteriaList = Kriteria::orderBy('id_kriteria')->get();
 
-        // 2. Tembak ke API Python (Port 8001)
-        try {
-            $pythonResponse = Http::post('http://127.0.0.1:8001/hitung-saw', [
-                'kriteria' => $data['kriteria'],
-                'dataset' => $data['dataset']
-            ]);
+        $dataset = [];
+        foreach ($pengajuanList as $p) {
+            if (!$p->warga) continue;
 
-            // 3. Kembalikan hasil perhitungan Python ke Frontend (React)
-            if ($pythonResponse->successful()) {
-                return response()->json($pythonResponse->json());
-            } else {
-                return response()->json([
-                    'success' => false, 
-                    'message' => 'Gagal menghitung di mesin Python. Cek log Python.'
-                ], 500);
+            $baris = [
+                'id_pengajuan' => $p->id_pengajuan,
+                'nama_warga'   => $p->warga->nama_lengkap,
+                'alamat'       => $p->warga->alamat ?? '',
+                'rt'           => $p->warga->rt,
+            ];
+
+            foreach ($p->penilaian as $penilaian) {
+                if (!$penilaian->subKriteria) continue;
+                $baris['C' . $penilaian->id_kriteria] = $penilaian->subKriteria->nilai;
             }
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false, 
-                'message' => 'Mesin Python tidak menyala atau tidak bisa dihubungi: ' . $e->getMessage()
-            ], 500);
+
+            $dataset[] = $baris;
         }
+
+        return response()->json([
+            'success'  => true,
+            'kriteria' => $kriteriaList->map(fn($k) => [
+                'id_kriteria'   => 'C' . $k->id_kriteria,
+                'nama_kriteria' => $k->nama_kriteria,
+                'tipe'          => $k->tipe,
+                'bobot'         => $k->bobot,
+            ]),
+            'dataset' => $dataset,
+        ]);
     }
 }

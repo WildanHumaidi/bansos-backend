@@ -16,7 +16,6 @@ class AuthController extends Controller
     public function register(Request $request)
     {
         try {
-            // Tangkap sesuai dengan inputan dari React
             $request->validate([
                 'nama_lengkap' => 'required|string|max:255',
                 'username'     => 'required|string|unique:users',
@@ -26,7 +25,6 @@ class AuthController extends Controller
             ]);
 
             $user = User::create([
-                // Kita simpan 'nama_lengkap' dari React ke kolom 'name' di database
                 'name'     => $request->nama_lengkap, 
                 'username' => $request->username,
                 'password' => Hash::make($request->password),

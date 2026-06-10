@@ -12,25 +12,30 @@ use Illuminate\Support\Facades\DB;
 class WargaController extends Controller
 {
     /**
+     * GET /api/warga/status
+     * GET /api/warga/pengajuan/status
+     *
      * Cek status pengajuan warga yang sedang login.
+     * Dicari berdasarkan nama user → id_warga → pengajuan terbaru.
      */
     public function getStatus(Request $request)
     {
         try {
-            // Cari data warga berdasarkan nama user yang login
+            $user = $request->user();
+
+            // Cari di tabel warga berdasarkan nama user yang login
             $warga = DB::table('warga')
-                ->where('nama_lengkap', $request->user()->name)
+                ->where('nama_lengkap', $user->name)
                 ->latest()
                 ->first();
 
             if (!$warga) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Data warga tidak ditemukan'
+                    'message' => 'Data warga tidak ditemukan. Silakan isi kuesioner terlebih dahulu.',
                 ], 404);
             }
 
-            // Ambil pengajuan menggunakan id_warga yang benar
             $pengajuan = DB::table('pengajuan')
                 ->where('id_warga', $warga->id_warga)
                 ->latest()
@@ -39,63 +44,127 @@ class WargaController extends Controller
             if (!$pengajuan) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Belum ada data pengajuan'
+                    'message' => 'Belum ada data pengajuan.',
                 ], 404);
             }
 
             return response()->json([
                 'success' => true,
-                'data'    => $pengajuan
+                'data'    => $pengajuan,
             ]);
 
         } catch (\Exception $e) {
-            return response()->json(['message' => $e->getMessage()], 500);
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
 
-    public function kirimPengajuan(Request $request)
+    /**
+     * Alias — supaya route lama /warga/status & /warga/pengajuan/status
+     * sama-sama mengarah ke getStatus()
+     */
+    public function cekStatus(Request $request)
+    {
+        return $this->getStatus($request);
+    }
+
+    /**
+     * POST /api/warga/pengajuan-rt
+     *
+     * Dipakai RT untuk input kuesioner atas nama warga.
+     * Menerima nama_lengkap, alamat, rt, jawaban_mentah (array).
+     */
+    public function store(Request $request)
     {
         try {
             $request->validate([
-                'alamat'         => 'required',
+                'nama_lengkap'   => 'required|string',
+                'alamat'         => 'required|string',
                 'rt'             => 'required',
-                'jawaban_mentah' => 'required|array'
+                'jawaban_mentah' => 'required|array',
             ]);
 
-            $user = Auth::user();
-
-            // Sinkronisasi ke tabel warga
             $warga = Warga::updateOrCreate(
-                ['nama_lengkap' => $user->name],
+                ['nama_lengkap' => $request->nama_lengkap],
                 [
                     'rt'       => $request->rt,
                     'alamat'   => $request->alamat,
                     'rw'       => '08',
-                    'password' => bcrypt('123')
+                    'password' => bcrypt('123'),
                 ]
             );
 
-            $idWargaAsli = $warga->id_warga ?? $warga->id;
+            $idWarga = $warga->id_warga ?? $warga->id;
 
-            // Cek duplikasi pengajuan
-            $cekData = Pengajuan::where('id_warga', $idWargaAsli)->first();
-            if ($cekData) {
+            $cek = Pengajuan::where('id_warga', $idWarga)->first();
+            if ($cek) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Anda sudah pernah mengirimkan pengajuan!'
+                    'message' => 'Warga ini sudah pernah memiliki pengajuan!',
                 ], 400);
             }
 
-
             $pengajuan                 = new Pengajuan();
-            $pengajuan->id_warga       = $idWargaAsli;
+            $pengajuan->id_warga       = $idWarga;
             $pengajuan->jawaban_mentah = json_encode($request->jawaban_mentah);
             $pengajuan->status         = 'menunggu';
             $pengajuan->save();
 
             return response()->json([
                 'success' => true,
-                'message' => 'Pengajuan berhasil dikirim dan siap diverifikasi!'
+                'message' => 'Data kuesioner warga berhasil disimpan!',
+                'data'    => $pengajuan,
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * POST /api/warga/pengajuan
+     *
+     * Dipakai Warga Dashboard — kirim kuesioner sendiri.
+     */
+    public function kirimPengajuan(Request $request)
+    {
+        try {
+            $request->validate([
+                'alamat'         => 'required',
+                'rt'             => 'required',
+                'jawaban_mentah' => 'required|array',
+            ]);
+
+            $user = Auth::user();
+
+            $warga = Warga::updateOrCreate(
+                ['nama_lengkap' => $user->name],
+                [
+                    'rt'       => $request->rt,
+                    'alamat'   => $request->alamat,
+                    'rw'       => '08',
+                    'password' => bcrypt('123'),
+                ]
+            );
+
+            $idWarga = $warga->id_warga ?? $warga->id;
+
+            $cek = Pengajuan::where('id_warga', $idWarga)->first();
+            if ($cek) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Anda sudah pernah mengirimkan pengajuan!',
+                ], 400);
+            }
+
+            $pengajuan                 = new Pengajuan();
+            $pengajuan->id_warga       = $idWarga;
+            $pengajuan->jawaban_mentah = json_encode($request->jawaban_mentah);
+            $pengajuan->status         = 'menunggu';
+            $pengajuan->save();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Pengajuan berhasil dikirim dan siap diverifikasi!',
             ]);
 
         } catch (\Exception $e) {

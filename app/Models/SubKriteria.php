@@ -2,16 +2,22 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
 class SubKriteria extends Model
 {
-    use HasFactory;
-
-    protected $table = 'sub_kriteria';
+    protected $table      = 'sub_kriteria';
     protected $primaryKey = 'id_subkriteria';
-    protected $fillable = ['id_kriteria', 'keterangan', 'nilai'];
+
+    protected $fillable = [
+        'id_kriteria',
+        'keterangan',
+        'nilai',
+    ];
+
+    protected $casts = [
+        'nilai' => 'float',
+    ];
 
     public function kriteria()
     {

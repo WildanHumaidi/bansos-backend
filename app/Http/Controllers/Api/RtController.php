@@ -24,4 +24,21 @@ class RtController extends Controller
         ]);
         return response()->json(['success' => true, 'message' => 'Pesan terkirim']);
     }
+    public function update(Request $request, $id)
+{
+    $pengajuan = Pengajuan::findOrFail($id);
+
+    $pengajuan->alamat = $request->alamat;
+
+    $pengajuan->jawaban_mentah = json_encode(
+        $request->jawaban_mentah
+    );
+
+    $pengajuan->save();
+
+    return response()->json([
+        'success' => true,
+        'message' => 'Berhasil diperbarui'
+    ]);
+}
 }

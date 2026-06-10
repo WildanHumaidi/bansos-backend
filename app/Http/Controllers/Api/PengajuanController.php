@@ -11,10 +11,9 @@ use Illuminate\Support\Facades\DB;
 
 class PengajuanController extends Controller
 {
-    // Fungsi untuk mengambil data form (ditampilkan di frontend warga)
     public function getFormKuesioner()
     {
-        // Mengambil semua kriteria beserta anak-anaknya (sub kriteria)
+        
         $kriteria = Kriteria::with('subKriteria')->get();
         
         return response()->json([
@@ -24,7 +23,7 @@ class PengajuanController extends Controller
         ]);
     }
 
-    // Fungsi untuk memproses saat warga klik "Submit"
+    
     public function submitPengajuan(Request $request)
     {
         $request->validate([
@@ -34,13 +33,12 @@ class PengajuanController extends Controller
 
         DB::beginTransaction();
         try {
-            // 1. Buat baris baru di tabel pengajuan
+            
             $pengajuan = Pengajuan::create([
                 'id_warga' => $request->id_warga,
                 'status' => 'menunggu_verifikasi'
             ]);
 
-            // 2. Looping jawaban warga dan simpan ke tabel penilaian
             foreach ($request->jawaban as $jawab) {
                 Penilaian::create([
                     'id_pengajuan' => $pengajuan->id_pengajuan,
